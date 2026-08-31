@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">OnMyWay</string>
+    <string name="travel_reminders_channel">Travel reminders</string>
+    <string name="monitoring_channel">Active monitoring</string>
 </resources>
