@@ -1,5 +1,15 @@
 # OnMyWay
 
+<p>
+  <a href="https://archuser.org/onmyway.apk">
+    <img src="readme-assets/badge_obtainium.png" alt="Get it on Obtainium" width="188" height="56" valign="middle">
+  </a>
+  <a href="https://github.com/firebadnofire/onmyway/releases">
+    <img src="readme-assets/badge-apk.png" alt="Download APK" width="145" height="56" valign="middle">
+  </a>
+</p>
+
+
 OnMyWay is a private, local Android utility for reminders that become useful
 when the physical environment changes. It is an event/trigger engine, not a
 navigation app. Rules, runtime state, and the most recent 200 trigger records are
