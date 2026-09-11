@@ -61,6 +61,7 @@ data class TriggerConfigEntity(
     val numberValue3: Double?,
     val optionValue: String?,
     val booleanValue: Boolean?,
+    val additionalTargets: String? = null,
 )
 
 @Entity(tableName = "trigger_history", indices = [Index("triggeredAt")])
@@ -141,7 +142,7 @@ abstract class EventDao {
 
 @Database(
     entities = [EventEntity::class, TriggerConfigEntity::class, HistoryEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -152,7 +153,13 @@ abstract class AppDatabase : RoomDatabase() {
             context.applicationContext,
             AppDatabase::class.java,
             "onmyway.db",
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE trigger_configs ADD COLUMN additionalTargets TEXT")
+            }
+        }
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(database: SupportSQLiteDatabase) {

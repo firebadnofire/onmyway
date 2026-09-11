@@ -24,6 +24,8 @@ import org.archuser.onmyway.domain.TriggerConfig
 import org.archuser.onmyway.domain.TriggerState
 import org.archuser.onmyway.domain.TriggerType
 import org.archuser.onmyway.domain.isValidBssid
+import org.archuser.onmyway.domain.normalizeBssid
+import org.archuser.onmyway.domain.normalizeSsid
 import org.archuser.onmyway.platform.PermissionStatusManager
 import org.archuser.onmyway.platform.WifiMonitor
 import java.io.ByteArrayOutputStream
@@ -40,6 +42,7 @@ data class EventDraft(
     val customSoundEnabled: Boolean = false,
     val customSoundUri: String? = null,
     val textValue: String = "",
+    val additionalTextValues: List<String> = emptyList(),
     val number1: String = "25",
     val number2: String = "",
     val number3: String = "150",
@@ -56,6 +59,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val monitoringStatus = app.coordinator.status
     val currentWifi = app.coordinator.currentWifi
     val lastScan = app.coordinator.lastScan
+    val scanStatus = app.wifiMonitor.scanStatus
     val permissions = PermissionStatusManager(application)
     val settings = app.settingsStore.settings
 
@@ -128,13 +132,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val candidate = runCatching { draft.toEvent() }.getOrElse { return done(it.message ?: "Invalid event") }
         viewModelScope.launch {
             val existing = candidate.id.takeIf { it != 0L }?.let { repository.event(it) }
-            val event = if (existing == null) candidate else candidate.copy(
-                enabled = existing.enabled,
-                createdAt = existing.createdAt,
-                lastTriggeredAt = existing.lastTriggeredAt,
-                triggerState = if (existing.config == candidate.config) existing.triggerState else TriggerState.UNKNOWN,
-                baseline = if (existing.config == candidate.config) existing.baseline else null,
-            )
+            val event = candidate.preserveRuntimeFrom(existing)
             runCatching { repository.save(event) }.fold({ done(null) }, { done(it.message ?: "Could not save event") })
         }
     }
@@ -158,21 +156,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private companion object { const val MAX_BACKUP_BYTES = 5 * 1024 * 1024 }
 }
 
-private fun EventDraft.toEvent(): NotificationEvent {
+internal fun NotificationEvent.preserveRuntimeFrom(existing: NotificationEvent?): NotificationEvent {
+    if (existing == null) return this
+    val sameCondition = existing.config == config && existing.invert == invert
+    return copy(
+        enabled = existing.enabled,
+        createdAt = existing.createdAt,
+        lastTriggeredAt = existing.lastTriggeredAt,
+        triggerState = if (sameCondition) existing.triggerState else TriggerState.UNKNOWN,
+        baseline = if (sameCondition) existing.baseline else null,
+    )
+}
+
+internal fun EventDraft.toEvent(): NotificationEvent {
     require(body.isNotBlank()) { "Notification text is required" }
     require(!customSoundEnabled || !customSoundUri.isNullOrBlank()) { "Choose a custom sound or turn off the override" }
+    val targets = when (type) {
+        TriggerType.CONNECTED_SSID, TriggerType.NEARBY_SSID -> (listOf(textValue) + additionalTextValues).map {
+            requireNotNull(normalizeSsid(it)) { "Enter every Wi-Fi name or remove its row" }
+        }.distinct()
+        TriggerType.CONNECTED_BSSID, TriggerType.NEARBY_BSSID -> (listOf(textValue) + additionalTextValues).map {
+            requireNotNull(normalizeBssid(it)) { "Enter each BSSID like aa:bb:cc:dd:ee:ff or remove its row" }
+        }.distinct()
+        else -> emptyList()
+    }
     val config: TriggerConfig = when (type) {
-        TriggerType.CONNECTED_SSID -> TriggerConfig.ConnectedSsid(textValue.trim().also { require(it.isNotEmpty()) { "Wi-Fi name is required" } })
-        TriggerType.CONNECTED_BSSID -> TriggerConfig.ConnectedBssid(textValue.trim().also { require(isValidBssid(it)) { "Enter a BSSID like aa:bb:cc:dd:ee:ff" } })
-        TriggerType.NEARBY_SSID -> TriggerConfig.NearbySsid(textValue.trim().also { require(it.isNotEmpty()) { "Wi-Fi name is required" } }, scanMode)
-        TriggerType.NEARBY_BSSID -> TriggerConfig.NearbyBssid(textValue.trim().also { require(isValidBssid(it)) { "Enter a BSSID like aa:bb:cc:dd:ee:ff" } }, scanMode)
+        TriggerType.CONNECTED_SSID -> TriggerConfig.ConnectedSsid(targets.first(), targets.drop(1))
+        TriggerType.CONNECTED_BSSID -> TriggerConfig.ConnectedBssid(targets.first(), targets.drop(1))
+        TriggerType.NEARBY_SSID -> TriggerConfig.NearbySsid(targets.first(), scanMode, targets.drop(1))
+        TriggerType.NEARBY_BSSID -> TriggerConfig.NearbyBssid(targets.first(), scanMode, targets.drop(1))
         TriggerType.GPS_CIRCLE -> TriggerConfig.GpsCircle(
             number1.toDoubleOrNull()?.also { require(it in -90.0..90.0) } ?: error("Valid latitude required"),
             number2.toDoubleOrNull()?.also { require(it in -180.0..180.0) } ?: error("Valid longitude required"),
-            number3.toDoubleOrNull()?.also { require(it > 0) } ?: error("Positive radius required"),
+            number3.toDoubleOrNull()?.also { require(it.isFinite() && it > 0) { "Finite positive radius required" } } ?: error("Positive radius required"),
         )
         TriggerType.DISTANCE_TRAVELED -> TriggerConfig.DistanceTraveled(
-            number1.toDoubleOrNull()?.also { require(it > 0) } ?: error("Positive distance required"), unit, includeElevation,
+            number1.toDoubleOrNull()?.also { require(it.isFinite() && it > 0) { "Finite positive distance required" } } ?: error("Positive distance required"), unit, includeElevation,
         )
     }
     return NotificationEvent(
@@ -189,17 +208,17 @@ private fun EventDraft.toEvent(): NotificationEvent {
     )
 }
 
-private fun NotificationEvent.toDraft(): EventDraft {
+internal fun NotificationEvent.toDraft(): EventDraft {
     val common = EventDraft(
         id = id, type = config.type, name = name, body = notificationBody,
         title = notificationTitle.orEmpty(), oneTime = oneTime, invert = invert,
         customSoundEnabled = customSoundEnabled, customSoundUri = customSoundUri,
     )
     return when (val value = config) {
-        is TriggerConfig.ConnectedSsid -> common.copy(textValue = value.ssid)
-        is TriggerConfig.ConnectedBssid -> common.copy(textValue = value.bssid)
-        is TriggerConfig.NearbySsid -> common.copy(textValue = value.ssid, scanMode = value.scanMode)
-        is TriggerConfig.NearbyBssid -> common.copy(textValue = value.bssid, scanMode = value.scanMode)
+        is TriggerConfig.ConnectedSsid -> common.copy(textValue = value.ssid, additionalTextValues = value.additionalSsids)
+        is TriggerConfig.ConnectedBssid -> common.copy(textValue = value.bssid, additionalTextValues = value.additionalBssids)
+        is TriggerConfig.NearbySsid -> common.copy(textValue = value.ssid, scanMode = value.scanMode, additionalTextValues = value.additionalSsids)
+        is TriggerConfig.NearbyBssid -> common.copy(textValue = value.bssid, scanMode = value.scanMode, additionalTextValues = value.additionalBssids)
         is TriggerConfig.GpsCircle -> common.copy(number1 = value.latitude.toString(), number2 = value.longitude.toString(), number3 = value.radiusMeters.toString())
         is TriggerConfig.DistanceTraveled -> common.copy(number1 = value.distance.toString(), unit = value.unit, includeElevation = value.includeElevation)
     }

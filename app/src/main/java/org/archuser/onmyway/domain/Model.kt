@@ -16,19 +16,19 @@ enum class ScanMode { BATTERY_SAVER, BALANCED, FREQUENT }
 sealed interface TriggerConfig {
     val type: TriggerType
 
-    data class ConnectedSsid(val ssid: String) : TriggerConfig {
+    data class ConnectedSsid(val ssid: String, val additionalSsids: List<String> = emptyList()) : TriggerConfig {
         override val type = TriggerType.CONNECTED_SSID
     }
 
-    data class ConnectedBssid(val bssid: String) : TriggerConfig {
+    data class ConnectedBssid(val bssid: String, val additionalBssids: List<String> = emptyList()) : TriggerConfig {
         override val type = TriggerType.CONNECTED_BSSID
     }
 
-    data class NearbySsid(val ssid: String, val scanMode: ScanMode) : TriggerConfig {
+    data class NearbySsid(val ssid: String, val scanMode: ScanMode, val additionalSsids: List<String> = emptyList()) : TriggerConfig {
         override val type = TriggerType.NEARBY_SSID
     }
 
-    data class NearbyBssid(val bssid: String, val scanMode: ScanMode) : TriggerConfig {
+    data class NearbyBssid(val bssid: String, val scanMode: ScanMode, val additionalBssids: List<String> = emptyList()) : TriggerConfig {
         override val type = TriggerType.NEARBY_BSSID
     }
 
@@ -104,3 +104,12 @@ data class TriggerEvaluation(
     val fired: Boolean,
     val acceptedObservation: Boolean = true,
 )
+
+/** Wi-Fi targets form one condition: any match is inside; no matches is outside. */
+fun TriggerConfig.wifiTargets(): List<String> = when (this) {
+    is TriggerConfig.ConnectedSsid -> listOf(ssid) + additionalSsids
+    is TriggerConfig.ConnectedBssid -> listOf(bssid) + additionalBssids
+    is TriggerConfig.NearbySsid -> listOf(ssid) + additionalSsids
+    is TriggerConfig.NearbyBssid -> listOf(bssid) + additionalBssids
+    else -> emptyList()
+}

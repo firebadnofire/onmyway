@@ -10,6 +10,13 @@ import androidx.core.content.ContextCompat
 import org.archuser.onmyway.domain.TriggerType
 
 class PermissionStatusManager(private val context: Context) {
+    fun monitoringIssue(): String? = when {
+        !granted(Manifest.permission.ACCESS_FINE_LOCATION) -> "Grant precise location to monitor reminders"
+        !context.getSystemService(LocationManager::class.java).isLocationEnabled -> "Enable location services to monitor reminders"
+        !NotificationDispatcher(context).canNotify() -> "Allow notifications to receive reminders"
+        else -> null
+    }
+
     fun initialInstallPermissions(): Array<String> = buildList {
         if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
         add(Manifest.permission.ACCESS_COARSE_LOCATION)
@@ -31,6 +38,7 @@ class PermissionStatusManager(private val context: Context) {
 
     fun issueFor(type: TriggerType): String? {
         if (!NotificationDispatcher(context).canNotify()) return "Notification permission required"
+        if (!context.getSystemService(LocationManager::class.java).isLocationEnabled) return "Location services disabled"
         return when (type) {
             TriggerType.CONNECTED_SSID, TriggerType.CONNECTED_BSSID ->
                 if (!granted(Manifest.permission.ACCESS_FINE_LOCATION)) "Location permission is required to read Wi-Fi identity" else null
@@ -43,7 +51,6 @@ class PermissionStatusManager(private val context: Context) {
             TriggerType.GPS_CIRCLE, TriggerType.DISTANCE_TRAVELED -> when {
                 !granted(Manifest.permission.ACCESS_FINE_LOCATION) -> "Location permission required"
                 !context.getSystemService(LocationManager::class.java).isLocationEnabled -> "Location services disabled"
-                Build.VERSION.SDK_INT >= 30 && !granted(Manifest.permission.ACCESS_BACKGROUND_LOCATION) -> "Background location required for reliable monitoring"
                 else -> null
             }
         }
@@ -52,7 +59,7 @@ class PermissionStatusManager(private val context: Context) {
     fun diagnostics(): List<Pair<String, String>> = listOf(
         "Notifications" to if (NotificationDispatcher(context).canNotify()) "Granted" else "Required",
         "Precise location" to permissionLabel(Manifest.permission.ACCESS_FINE_LOCATION),
-        "Background location" to permissionLabel(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+        "Background location" to if (granted(Manifest.permission.ACCESS_BACKGROUND_LOCATION)) "Granted" else "Needed for background restart",
         "Nearby Wi-Fi" to if (Build.VERSION.SDK_INT >= 33) permissionLabel(Manifest.permission.NEARBY_WIFI_DEVICES) else "Not required on this Android version",
         "Location services" to if (context.getSystemService(LocationManager::class.java).isLocationEnabled) "Enabled" else "Disabled",
         "Wi-Fi" to if (context.getSystemService(WifiManager::class.java).isWifiEnabled) "Enabled" else "Disabled",

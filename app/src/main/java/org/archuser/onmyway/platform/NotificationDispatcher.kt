@@ -41,9 +41,22 @@ class NotificationDispatcher(
     fun canNotify(): Boolean = NotificationManagerCompat.from(context).areNotificationsEnabled() &&
         (Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
 
+    fun channelIssues(): List<Pair<String, String>> = context.getSystemService(NotificationManager::class.java)
+        .notificationChannels.filter { it.id == REMINDERS_CHANNEL || it.id.startsWith("${REMINDERS_CHANNEL}_sound_") }
+        .mapNotNull { channel ->
+            val issue = when {
+                channel.importance == NotificationManager.IMPORTANCE_NONE -> "Blocked"
+                channel.importance < NotificationManager.IMPORTANCE_DEFAULT || channel.sound == null -> "Silent"
+                channel.importance < NotificationManager.IMPORTANCE_HIGH -> "Pop-up banners disabled"
+                else -> null
+            }
+            issue?.let { channel.id to "${channel.name}: $it" }
+        }
+
     fun post(event: NotificationEvent): Boolean {
         if (!canNotify()) return false
         val channel = runCatching { reminderChannel(event) }.getOrDefault(REMINDERS_CHANNEL)
+        if (context.getSystemService(NotificationManager::class.java).getNotificationChannel(channel)?.importance == NotificationManager.IMPORTANCE_NONE) return false
         val intent = Intent(context, MainActivity::class.java).putExtra("event_id", event.id)
         val pendingIntent = PendingIntent.getActivity(
             context,
@@ -58,10 +71,11 @@ class NotificationDispatcher(
             .setStyle(NotificationCompat.BigTextStyle().bigText(event.notificationBody))
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         return try {
-            NotificationManagerCompat.from(context).notify(event.id.hashCode(), notification)
+            NotificationManagerCompat.from(context).notify("reminder:${event.id}", event.id.hashCode(), notification)
             true
         } catch (_: SecurityException) {
             false

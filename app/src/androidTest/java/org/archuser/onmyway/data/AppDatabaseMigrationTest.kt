@@ -7,6 +7,22 @@ import org.junit.Rule
 import org.junit.Test
 
 class AppDatabaseMigrationTest {
+    @Test fun migrate3To4PreservesSingleTargetAndRuntimeState() {
+        helper.createDatabase(DATABASE_NAME, 3).use { database ->
+            database.execSQL("""INSERT INTO notification_events
+                (id, name, enabled, triggerType, notificationBody, oneTime, invert, customSoundEnabled, createdAt, triggerState)
+                VALUES (1, 'Home', 1, 'CONNECTED_BSSID', 'Remember', 0, 1, 0, 100, 'UNSATISFIED')""")
+            database.execSQL("INSERT INTO trigger_configs (eventId, textValue) VALUES (1, 'aa:bb:cc:dd:ee:ff')")
+        }
+        helper.runMigrationsAndValidate(DATABASE_NAME, 4, true, AppDatabase.MIGRATION_3_4).use { database ->
+            database.query("SELECT textValue, additionalTargets, triggerState FROM trigger_configs JOIN notification_events ON eventId = id").use {
+                it.moveToFirst()
+                assertEquals("aa:bb:cc:dd:ee:ff", it.getString(0))
+                assertEquals(true, it.isNull(1))
+                assertEquals("UNSATISFIED", it.getString(2))
+            }
+        }
+    }
     @get:Rule
     val helper = MigrationTestHelper(
         InstrumentationRegistry.getInstrumentation(),

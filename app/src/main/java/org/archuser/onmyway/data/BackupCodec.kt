@@ -8,13 +8,14 @@ import org.archuser.onmyway.domain.TriggerConfig
 import org.archuser.onmyway.domain.TriggerState
 import org.archuser.onmyway.domain.TriggerType
 import org.archuser.onmyway.domain.isValidBssid
+import org.archuser.onmyway.domain.wifiTargets
 import org.json.JSONArray
 import org.json.JSONObject
 
 data class AppBackup(val settings: AppSettings, val storedData: StoredData)
 
 object BackupCodec {
-    private const val VERSION = 1
+    private const val VERSION = 2
 
     fun encode(backup: AppBackup): String = JSONObject()
         .put("format", "onmyway-backup")
@@ -27,7 +28,7 @@ object BackupCodec {
     fun decode(text: String): AppBackup {
         val root = JSONObject(text)
         require(root.getString("format") == "onmyway-backup") { "Not an OnMyWay backup" }
-        require(root.getInt("version") == VERSION) { "Unsupported backup version" }
+        require(root.getInt("version") in 1..VERSION) { "Unsupported backup version" }
         val events = root.getJSONArray("events").objects().map(::eventFromJson).onEach(::validateEvent)
         require(events.map(NotificationEvent::id).all { it > 0 } && events.map(NotificationEvent::id).distinct().size == events.size) {
             "Backup contains invalid or duplicate reminder IDs"
@@ -80,11 +81,21 @@ object BackupCodec {
     private fun validateEvent(event: NotificationEvent) {
         require(event.notificationBody.isNotBlank()) { "A reminder has empty notification text" }
         require(!event.customSoundEnabled || !event.customSoundUri.isNullOrBlank()) { "A reminder has no custom sound file" }
+        event.baseline?.let { baseline ->
+            require(
+                baseline.latitude in -90.0..90.0 && baseline.longitude in -180.0..180.0 &&
+                    (baseline.altitudeMeters == null || baseline.altitudeMeters.isFinite()) &&
+                    (baseline.horizontalAccuracyMeters == null ||
+                        baseline.horizontalAccuracyMeters.isFinite() && baseline.horizontalAccuracyMeters >= 0f) &&
+                    (baseline.verticalAccuracyMeters == null ||
+                        baseline.verticalAccuracyMeters.isFinite() && baseline.verticalAccuracyMeters >= 0f),
+            ) { "A reminder has an invalid location baseline" }
+        }
         when (val config = event.config) {
-            is TriggerConfig.ConnectedSsid -> require(config.ssid.isNotBlank()) { "A reminder has an empty Wi-Fi name" }
-            is TriggerConfig.ConnectedBssid -> require(isValidBssid(config.bssid)) { "A reminder has an invalid BSSID" }
-            is TriggerConfig.NearbySsid -> require(config.ssid.isNotBlank()) { "A reminder has an empty Wi-Fi name" }
-            is TriggerConfig.NearbyBssid -> require(isValidBssid(config.bssid)) { "A reminder has an invalid BSSID" }
+            is TriggerConfig.ConnectedSsid -> require(config.wifiTargets().all { it.isNotBlank() }) { "A reminder has an empty Wi-Fi name" }
+            is TriggerConfig.ConnectedBssid -> require(config.wifiTargets().all(::isValidBssid)) { "A reminder has an invalid BSSID" }
+            is TriggerConfig.NearbySsid -> require(config.wifiTargets().all { it.isNotBlank() }) { "A reminder has an empty Wi-Fi name" }
+            is TriggerConfig.NearbyBssid -> require(config.wifiTargets().all(::isValidBssid)) { "A reminder has an invalid BSSID" }
             is TriggerConfig.GpsCircle -> require(
                 config.latitude.isFinite() && config.latitude in -90.0..90.0 &&
                     config.longitude.isFinite() && config.longitude in -180.0..180.0 &&
@@ -97,19 +108,19 @@ object BackupCodec {
     }
 
     private fun TriggerConfig.toJson(): JSONObject = when (this) {
-        is TriggerConfig.ConnectedSsid -> JSONObject().put("text", ssid)
-        is TriggerConfig.ConnectedBssid -> JSONObject().put("text", bssid)
-        is TriggerConfig.NearbySsid -> JSONObject().put("text", ssid).put("scanMode", scanMode.name)
-        is TriggerConfig.NearbyBssid -> JSONObject().put("text", bssid).put("scanMode", scanMode.name)
+        is TriggerConfig.ConnectedSsid -> JSONObject().put("text", ssid).put("additionalTargets", JSONArray(additionalSsids))
+        is TriggerConfig.ConnectedBssid -> JSONObject().put("text", bssid).put("additionalTargets", JSONArray(additionalBssids))
+        is TriggerConfig.NearbySsid -> JSONObject().put("text", ssid).put("additionalTargets", JSONArray(additionalSsids)).put("scanMode", scanMode.name)
+        is TriggerConfig.NearbyBssid -> JSONObject().put("text", bssid).put("additionalTargets", JSONArray(additionalBssids)).put("scanMode", scanMode.name)
         is TriggerConfig.GpsCircle -> JSONObject().put("latitude", latitude).put("longitude", longitude).put("radiusMeters", radiusMeters)
         is TriggerConfig.DistanceTraveled -> JSONObject().put("distance", distance).put("unit", unit.name).put("includeElevation", includeElevation)
     }
 
     private fun configFromJson(type: TriggerType, value: JSONObject): TriggerConfig = when (type) {
-        TriggerType.CONNECTED_SSID -> TriggerConfig.ConnectedSsid(value.getString("text"))
-        TriggerType.CONNECTED_BSSID -> TriggerConfig.ConnectedBssid(value.getString("text"))
-        TriggerType.NEARBY_SSID -> TriggerConfig.NearbySsid(value.getString("text"), ScanMode.valueOf(value.getString("scanMode")))
-        TriggerType.NEARBY_BSSID -> TriggerConfig.NearbyBssid(value.getString("text"), ScanMode.valueOf(value.getString("scanMode")))
+        TriggerType.CONNECTED_SSID -> TriggerConfig.ConnectedSsid(value.getString("text"), value.extraTargets())
+        TriggerType.CONNECTED_BSSID -> TriggerConfig.ConnectedBssid(value.getString("text"), value.extraTargets())
+        TriggerType.NEARBY_SSID -> TriggerConfig.NearbySsid(value.getString("text"), ScanMode.valueOf(value.getString("scanMode")), value.extraTargets())
+        TriggerType.NEARBY_BSSID -> TriggerConfig.NearbyBssid(value.getString("text"), ScanMode.valueOf(value.getString("scanMode")), value.extraTargets())
         TriggerType.GPS_CIRCLE -> TriggerConfig.GpsCircle(value.getDouble("latitude"), value.getDouble("longitude"), value.getDouble("radiusMeters"))
         TriggerType.DISTANCE_TRAVELED -> TriggerConfig.DistanceTraveled(value.getDouble("distance"), DistanceUnit.valueOf(value.getString("unit")), value.getBoolean("includeElevation"))
     }
@@ -132,6 +143,15 @@ object BackupCodec {
         value.getLong("id"), value.getLong("eventId"), value.getString("eventLabel"),
         value.getString("triggerSummary"), value.getLong("triggeredAt"),
     )
+
+    private fun JSONObject.extraTargets(): List<String> {
+        if (!has("additionalTargets")) return emptyList() // Version 1 backups.
+        val values = getJSONArray("additionalTargets")
+        return (0 until values.length()).map {
+            require(values.get(it) is String) { "Wi-Fi targets must be strings" }
+            values.getString(it)
+        }
+    }
 
     private fun JSONArray.objects() = (0 until length()).map { getJSONObject(it) }
     private fun JSONObject.putNullable(name: String, value: Any?) = put(name, value ?: JSONObject.NULL)

@@ -30,6 +30,11 @@ All triggers are edge based. A recurring rule rearms only after its condition is
 no longer satisfied. A one-time rule disables itself after firing; it remains in
 the app and can be re-enabled.
 
+Wi-Fi reminders support multiple SSIDs or BSSIDs with Add and Remove controls.
+Any listed target satisfies the rule. Moving between listed 2.4 GHz and 5 GHz
+access points does not retrigger it; an inverted rule fires only when all listed
+targets are absent. Existing single-target reminders are preserved during upgrade.
+
 SSID, BSSID, and GPS rules also offer **Invert**. With it enabled, the same
 outside/inside edge logic fires when the device leaves the matching network or
 GPS circle. The first observation establishes state; it does not fire merely
@@ -54,6 +59,9 @@ history, and global settings. Import validates the file and asks before replacin
 current data. Audio itself is not copied into JSON: document references may not
 be readable after moving a backup to another device, in which case notifications
 fall back to the normal sound until the audio is selected again.
+
+New exports use backup version 2 to include additional Wi-Fi targets. Version 1
+backups can still be imported; older app versions cannot import version 2 files.
 
 Example:
 
@@ -105,17 +113,37 @@ cards and Diagnostics show missing permissions or disabled system services.
 
 Connected Wi-Fi rules use `ConnectivityManager` callbacks and never request an
 active scan. Nearby Wi-Fi rules listen for system scan broadcasts and request
-scans at conservative battery-saver, balanced, or frequent intervals. Android
+scans every 30 minutes (battery saver), 15 minutes (balanced), or 30 seconds
+(frequent). Only enabled nearby rules determine the shared cadence; the fastest
+requested mode wins. Connected rules never request scans or periodic polling.
+Android
 may throttle or reject any request; a rejected or cached scan never rearms a
 rule. The UI therefore describes scanning as best effort rather than promising
 an exact schedule.
 
-GPS-circle and distance rules use a visible location foreground service because
-they must work while the Activity is closed. The service runs only while at
-least one enabled location rule requires it. Distance rules request higher
-frequency updates and have higher battery use; GPS circles use slower updates.
-Android may prevent a foreground service from starting from a background state,
-especially after reboot. In that case Diagnostics asks the user to open OnMyWay.
+All enabled rules run under one location foreground service with a quiet ongoing
+notification. Wi-Fi connection callbacks and nearby scanning remain independent;
+Wi-Fi-only configurations request no GPS updates. Distance rules request higher
+frequency location updates; GPS circles use slower updates. Disabling the last
+rule stops the service after any in-flight reminder is delivered.
+
+The service continues when the Activity closes and restores its requirements
+from Room after a system restart. Opening the app or returning from permission
+settings retries monitoring. Android may refuse a background start, especially
+after reboot without background location access; Diagnostics then asks the user
+to reopen OnMyWay. Force stop requires reopening the app. Device idle restrictions,
+scan throttling, and manufacturer battery management still apply.
+
+Reminder sounds remain separate from the silent monitoring notification and
+respect silent mode, Do Not Disturb, notification volume, and channel settings.
+Diagnostics identifies blocked or silent reminder channels and links to Android
+settings. It also provides permission and battery-settings access.
+
+When a reminder is first enabled, OnMyWay explains battery optimization and offers
+Android's direct exemption prompt. Declining does not disable reminders; the prompt
+can be reopened through Diagnostics. If the phone lacks the direct prompt, the app
+shows instructions instead of opening an unexplained settings page. Allowing the
+exemption can improve idle-time monitoring but may increase battery use.
 
 ## Accuracy and privacy limits
 
@@ -132,7 +160,7 @@ and bounded trigger history.
 
 ## Release workflow
 
-Pushing a `v*` or `V*` tag runs `.forgejo/workflows/release-apk.yml`. CI requires
+Pushing a `v*` or `V*` tag runs `.forgejo/workflows/release.yml`. CI requires
 the Android keystore secrets plus `CI_KEY` and `CI_KEY_PASSPHRASE`, verifies the
 pinned OpenPGP fingerprint, builds the signed APK, generates and verifies an
 armored `.asc`, and publishes both assets idempotently to Forgejo. Optional

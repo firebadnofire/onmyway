@@ -2,21 +2,14 @@ package org.archuser.onmyway.platform
 
 import android.content.Context
 import android.content.Intent
-import android.os.Build
+import android.util.Log
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.archuser.onmyway.data.EventRepository
-import org.archuser.onmyway.domain.ScanMode
-import org.archuser.onmyway.domain.TriggerConfig
-import org.archuser.onmyway.domain.TriggerEngine
-import org.archuser.onmyway.domain.TriggerObservation
+import org.archuser.onmyway.domain.*
 
 class MonitoringCoordinator(
     private val context: Context,
@@ -25,89 +18,152 @@ class MonitoringCoordinator(
     private val notifications: NotificationDispatcher,
     private val scope: CoroutineScope,
 ) {
-    val status = MutableStateFlow("Monitoring starting")
+    val status = MutableStateFlow("Monitoring stopped")
     val currentWifi = MutableStateFlow<Pair<String?, String?>>(null to null)
     val lastScan = MutableStateFlow<Pair<Long, Int>?>(null)
     private val engine = TriggerEngine()
     private val mutex = Mutex()
-    private var connectionJob: Job? = null
-    private var scanJob: Job? = null
+    private val refreshRequests = MutableStateFlow(0L)
+    private val failures = mutableMapOf<String, String>()
+    private var visibleJob: Job? = null
+    private var monitoringJob: Job? = null
+    private var serviceScope: CoroutineScope? = null
+    private var lastConnection: TriggerObservation.WifiConnection? = null
+    private var armedCount = 0
 
-    fun start() {
-        scope.launch {
-            repository.events.collectLatest { events ->
-                val enabled = events.filter { it.enabled }
-                configureWifi(enabled.any { it.config is TriggerConfig.ConnectedSsid || it.config is TriggerConfig.ConnectedBssid })
-                configureScan(enabled.mapNotNull { configScanMode(it.config) }.minByOrNull(ScanMode::ordinal))
-                configureLocation(
-                    required = enabled.any { it.config is TriggerConfig.GpsCircle || it.config is TriggerConfig.DistanceTraveled },
-                    highPrecision = enabled.any { it.config is TriggerConfig.DistanceTraveled },
-                )
-                status.value = if (enabled.isEmpty()) "No events armed" else "Monitoring active • ${enabled.size} armed"
+    /** The Activity watches only rule requirements; it never owns sensor subscriptions. */
+    fun onVisible() {
+        if (visibleJob?.isActive != true) {
+            visibleJob = scope.launch {
+                repository.events.map { events ->
+                    events.filter { it.enabled }.map { Triple(it.id, it.config, it.invert) }
+                }.distinctUntilChanged().catch { reportFailure("storage", it) }.collect { refreshSafely() }
             }
-        }
+        } else scope.launch { refreshSafely() }
     }
 
-    fun refresh() { /* Room Flow is authoritative and already replays current state. */ }
-
-    fun accept(observation: TriggerObservation) {
-        when (observation) {
-            is TriggerObservation.WifiConnection -> currentWifi.value = observation.ssid to observation.bssid
-            is TriggerObservation.WifiScan -> if (observation.fresh) lastScan.value = observation.timestampMillis to observation.accessPoints.size
-            else -> Unit
-        }
-        scope.launch { evaluate(observation) }
+    private suspend fun refreshSafely() {
+        try { refresh() } catch (error: CancellationException) { throw error }
+        catch (error: Exception) { reportFailure("startup", error) }
     }
 
-    private suspend fun evaluate(observation: TriggerObservation) = mutex.withLock {
-        repository.enabledEvents().forEach { event ->
-            val result = engine.evaluate(event, observation)
-            if (result.acceptedObservation && result.event != event) {
-                repository.persistEvaluation(result.event, result.fired)
-                if (result.fired && !notifications.post(result.event)) {
-                    status.value = "Notification permission required"
-                }
-            }
-        }
-    }
+    fun onHidden() { visibleJob?.cancel(); visibleJob = null }
 
-    private fun configureWifi(required: Boolean) {
-        if (!required) {
-            connectionJob?.cancel()
-            connectionJob = null
-        } else if (connectionJob == null) {
-            connectionJob = scope.launch {
-                wifiMonitor.connections().catch { status.value = "Wi-Fi permission or state unavailable" }.collect(::accept)
-            }
+    suspend fun refresh() {
+        if (repository.enabledEvents().isEmpty()) {
+            if (monitoringJob?.isActive != true) status.value = "No events armed"
+            return
         }
-    }
-
-    private fun configureScan(mode: ScanMode?) {
-        scanJob?.cancel()
-        scanJob = mode?.let {
-            scope.launch {
-                wifiMonitor.scans(it).catch { status.value = "Nearby Wi-Fi permission required" }.collect(::accept)
-            }
-        }
-    }
-
-    private fun configureLocation(required: Boolean, highPrecision: Boolean) {
-        val intent = Intent(context, LocationMonitoringService::class.java)
-            .putExtra(LocationMonitoringService.EXTRA_HIGH_PRECISION, highPrecision)
-        if (!required) {
-            context.stopService(intent)
+        val issue = PermissionStatusManager(context).monitoringIssue()
+        if (issue != null) {
+            status.value = issue
             return
         }
         try {
-            ContextCompat.startForegroundService(context, intent)
-        } catch (_: RuntimeException) {
-            status.value = "Open OnMyWay to start location monitoring"
+            ContextCompat.startForegroundService(context, Intent(context, LocationMonitoringService::class.java))
+        } catch (error: RuntimeException) {
+            Log.w("OnMyWay", "Foreground monitoring start refused", error)
+            status.value = "Open OnMyWay to resume monitoring • ${error.javaClass.simpleName}"
         }
     }
 
-    private fun configScanMode(config: TriggerConfig): ScanMode? = when (config) {
-        is TriggerConfig.NearbySsid -> config.scanMode
-        is TriggerConfig.NearbyBssid -> config.scanMode
-        else -> null
+    internal fun startMonitoring(
+        owner: CoroutineScope,
+        configureLocation: (LocationRequestSpec?) -> Unit,
+        updateNotification: (Int) -> Unit,
+        stop: () -> Unit,
+    ) {
+        if (monitoringJob?.isActive == true) {
+            refreshRequests.value++
+            return
+        }
+        serviceScope = owner
+        failures.clear()
+        val subscriptions = MonitoringSubscriptions(owner, wifiMonitor::connections, wifiMonitor::scans,
+            ::evaluate, ::reportFailure)
+        monitoringJob = owner.launch {
+            combine(repository.events, refreshRequests) { events, _ -> events }
+                .catch { reportFailure("storage", it) }
+                .collect {
+                    mutex.withLock {
+                        // A pending Room emission may predate the evaluation that just finished.
+                        val enabled = repository.enabledEvents()
+                        armedCount = enabled.size
+                        if (enabled.isEmpty()) {
+                            if (failures.isEmpty()) status.value = "No events armed" else publishStatus()
+                            stop()
+                            return@withLock
+                        }
+                        val issue = PermissionStatusManager(context).monitoringIssue()
+                        if (issue != null) {
+                            status.value = issue
+                            stop()
+                            return@withLock
+                        }
+                        val requirements = MonitoringRequirements.from(enabled)
+                        if (!requirements.observeConnectedWifi) lastConnection = null
+                        subscriptions.apply(requirements)
+                        configureLocation(requirements.locationRequest)
+                        updateNotification(enabled.size)
+                        // New or edited connected rules need an initial observation even when
+                        // an existing callback subscription does not need to be replaced.
+                        lastConnection?.let { connection ->
+                            enabled.filter { it.triggerState == TriggerState.UNKNOWN &&
+                                (it.config is TriggerConfig.ConnectedSsid || it.config is TriggerConfig.ConnectedBssid)
+                            }.forEach { evaluateEvent(it, connection) }
+                        }
+                        publishStatus()
+                    }
+                }
+        }
+    }
+
+    fun accept(observation: TriggerObservation) {
+        serviceScope?.launch { evaluate(observation) }
+    }
+
+    private suspend fun evaluate(observation: TriggerObservation) = mutex.withLock {
+        when (observation) {
+            is TriggerObservation.WifiConnection -> {
+                lastConnection = observation
+                currentWifi.value = observation.ssid to observation.bssid
+            }
+            is TriggerObservation.WifiScan -> if (observation.fresh) {
+                lastScan.value = observation.timestampMillis to observation.accessPoints.size
+            }
+            else -> Unit
+        }
+        repository.enabledEvents().forEach { evaluateEvent(it, observation) }
+    }
+
+    private suspend fun evaluateEvent(event: NotificationEvent, observation: TriggerObservation) {
+        val result = engine.evaluate(event, observation)
+        if (result.acceptedObservation && result.event != event) {
+            repository.persistEvaluation(result.event, result.fired)
+            if (result.fired && !notifications.post(result.event)) {
+                reportFailure("notification", IllegalStateException("Reminder notification blocked; check notification settings"))
+            }
+        }
+    }
+
+    internal fun reportFailure(source: String, error: Throwable?) {
+        if (error == null) failures.remove(source) else {
+            Log.w("OnMyWay", "Monitoring $source failed", error)
+            failures[source] = "$source: ${error.message ?: error.javaClass.simpleName}"
+        }
+        publishStatus()
+    }
+
+    private fun publishStatus() {
+        status.value = if (failures.isEmpty()) "Monitoring active • $armedCount armed"
+            else "Monitoring needs attention • ${failures.values.joinToString()}"
+    }
+
+    internal fun stopped() {
+        monitoringJob?.cancel()
+        monitoringJob = null
+        serviceScope = null
+        lastConnection = null
+        if (status.value.startsWith("Monitoring active")) status.value = "Monitoring stopped • open OnMyWay to resume"
     }
 }

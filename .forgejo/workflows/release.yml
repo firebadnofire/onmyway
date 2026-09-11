@@ -1,4 +1,4 @@
-name: Release APK
+name: Release OnMyWay APK
 
 env:
   RELEASE_SIGNING_FINGERPRINT: 7D6EF134D851C8DA0862D97494F31AF374E2EE3C
@@ -180,7 +180,7 @@ jobs:
             exit 1
           fi
           chmod +x ./gradlew
-          ./gradlew --no-daemon assembleRelease
+          ./gradlew --no-daemon testDebugUnitTest lintDebug assembleRelease
 
       - name: Prepare release asset
         shell: bash
@@ -195,6 +195,19 @@ jobs:
             echo "Expected exactly one release APK, found ${#apk_files[@]}." >&2
             exit 1
           fi
+
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?Missing Android SDK directory}}"
+          apksigner="$(find "$sdk_root/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner | sort -V | tail -n 1)"
+          if [ -z "$apksigner" ] || [ ! -x "$apksigner" ] || [ ! -x "${apksigner%/*}/aapt" ]; then
+            echo "Android APK verification tools are unavailable." >&2
+            exit 1
+          fi
+          "$apksigner" verify --verbose "${apk_files[0]}"
+          package_info="$("${apksigner%/*}/aapt" dump badging "${apk_files[0]}" | sed -n '1p')"
+          case "$package_info" in
+            "package: name='org.archuser.onmyway' "*) ;;
+            *) echo "Refusing to release an APK with the wrong application ID." >&2; exit 1 ;;
+          esac
 
           mkdir -p dist
           cp "${apk_files[0]}" "dist/onmyway-${tag}.apk"

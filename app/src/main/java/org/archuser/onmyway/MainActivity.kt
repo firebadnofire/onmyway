@@ -7,7 +7,11 @@ import android.provider.Settings
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.PowerManager
+import android.content.Context
+import android.content.ActivityNotFoundException
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -59,6 +63,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -69,8 +74,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.view.WindowCompat
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import org.archuser.onmyway.platform.NotificationDispatcher
 import org.archuser.onmyway.data.HistoryEntity
 import org.archuser.onmyway.data.summary
 import org.archuser.onmyway.domain.DistanceUnit
@@ -99,6 +107,12 @@ class MainActivity : ComponentActivity() {
                 settings.darkThemeEnabled -> darkColorScheme()
                 else -> lightColorScheme()
             }
+            SideEffect {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !settings.darkThemeEnabled
+                    isAppearanceLightNavigationBars = !settings.darkThemeEnabled
+                }
+            }
             MaterialTheme(colorScheme = colors) { Surface(Modifier.fillMaxSize()) { OnMyWayApp(viewModel) } }
         }
         if (!getPreferences(MODE_PRIVATE).getBoolean(PERMISSION_PROMPT_SHOWN, false)) {
@@ -109,6 +123,16 @@ class MainActivity : ComponentActivity() {
                 else maybeOpenBackgroundLocationSettings()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        (application as OnMyWayApplication).coordinator.onVisible()
+    }
+
+    override fun onStop() {
+        (application as OnMyWayApplication).coordinator.onHidden()
+        super.onStop()
     }
 
     private fun maybeOpenBackgroundLocationSettings() {
@@ -128,6 +152,8 @@ private enum class Screen { HOME, EDITOR, HISTORY, DIAGNOSTICS }
 
 @Composable
 private fun OnMyWayApp(viewModel: AppViewModel) {
+    val events by viewModel.events.collectAsStateWithLifecycle()
+    BatteryOptimizationAction(autoPrompt = events.any { it.enabled }, showButton = false)
     var screen by remember { mutableStateOf(Screen.HOME) }
     var editingId by remember { mutableLongStateOf(0L) }
     when (screen) {
@@ -273,25 +299,73 @@ private fun EventCard(event: NotificationEvent, viewModel: AppViewModel, edit: (
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EditorScreen(viewModel: AppViewModel, id: Long, close: () -> Unit) {
-    var draft by remember { mutableStateOf(EventDraft(id = id)) }
-    var loaded by remember { mutableStateOf(id == 0L) }
+    var draft by remember(id) { mutableStateOf(EventDraft(id = id)) }
+    var originalDraft by remember(id) { mutableStateOf(draft) }
+    var loaded by remember(id) { mutableStateOf(id == 0L) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var confirmLeave by remember(id) { mutableStateOf(false) }
+    var saving by remember(id) { mutableStateOf(false) }
+    val requestClose: () -> Unit = {
+        if (!saving) {
+            if (draft != originalDraft) confirmLeave = true else close()
+        }
+    }
+    val save: () -> Unit = {
+        if (!saving) {
+            saving = true
+            confirmLeave = false
+            viewModel.save(draft) { message ->
+                saving = false
+                error = message
+                if (message == null) close()
+            }
+        }
+    }
+    BackHandler(onBack = requestClose)
     val soundPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) viewModel.selectSound(uri) { selected, pickerError ->
             if (selected != null) draft = draft.copy(customSoundEnabled = true, customSoundUri = selected)
             error = pickerError
         }
     }
-    LaunchedEffect(id) { if (id != 0L) { draft = viewModel.draft(id); loaded = true } }
+    LaunchedEffect(id) {
+        if (id != 0L) {
+            val loadedDraft = viewModel.draft(id)
+            draft = loadedDraft
+            originalDraft = loadedDraft
+            loaded = true
+        }
+    }
     if (!loaded) return
-    Scaffold(topBar = { TopAppBar(title = { Text(if (id == 0L) "New reminder" else "Edit reminder") }, navigationIcon = { Button(onClick = close) { Text("Back") } }) }) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { Text(if (id == 0L) "New reminder" else "Edit reminder") }, navigationIcon = { Button(onClick = requestClose, enabled = !saving) { Text("Back") } }) }) { padding ->
         LazyColumn(Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item { TriggerPicker(draft.type) { draft = draft.copy(type = it, textValue = "", number1 = "25", number2 = "", number3 = "150", unit = DistanceUnit.FEET, scanMode = ScanMode.BALANCED, includeElevation = false, invert = false) } }
+            item { TriggerPicker(draft.type) { draft = draft.copy(type = it, textValue = "", additionalTextValues = emptyList(), number1 = "25", number2 = "", number3 = "150", unit = DistanceUnit.FEET, scanMode = ScanMode.BALANCED, includeElevation = false, invert = false) } }
             item { OutlinedTextField(draft.name, { draft = draft.copy(name = it) }, label = { Text("Event name (optional)") }, modifier = Modifier.fillMaxWidth()) }
             when (draft.type) {
-                TriggerType.CONNECTED_SSID, TriggerType.NEARBY_SSID -> item { OutlinedTextField(draft.textValue, { draft = draft.copy(textValue = it) }, label = { Text("Wi-Fi name (SSID)") }, modifier = Modifier.fillMaxWidth()) }
-                TriggerType.CONNECTED_BSSID, TriggerType.NEARBY_BSSID -> item { OutlinedTextField(draft.textValue, { draft = draft.copy(textValue = it) }, label = { Text("Access point (BSSID)") }, modifier = Modifier.fillMaxWidth()) }
+                TriggerType.CONNECTED_SSID, TriggerType.NEARBY_SSID,
+                TriggerType.CONNECTED_BSSID, TriggerType.NEARBY_BSSID -> {
+                    val targets = listOf(draft.textValue) + draft.additionalTextValues
+                    val bssid = draft.type == TriggerType.CONNECTED_BSSID || draft.type == TriggerType.NEARBY_BSSID
+                    items(targets.size) { index ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(targets[index], { text ->
+                                val updated = targets.toMutableList().apply { this[index] = text }
+                                draft = draft.copy(textValue = updated.first(), additionalTextValues = updated.drop(1))
+                            }, label = { Text(if (bssid) "BSSID ${index + 1}" else "SSID ${index + 1}") }, modifier = Modifier.weight(1f))
+                            TextButton(enabled = targets.size > 1, onClick = {
+                                val updated = targets.filterIndexed { i, _ -> i != index }
+                                draft = draft.copy(textValue = updated.first(), additionalTextValues = updated.drop(1))
+                            }) { Text("Remove") }
+                        }
+                    }
+                    item {
+                        OutlinedButton(onClick = { draft = draft.copy(additionalTextValues = draft.additionalTextValues + "") }) {
+                            Text(if (bssid) "Add BSSID" else "Add SSID")
+                        }
+                        Text("Matches any listed network. Invert triggers after leaving all of them.")
+                    }
+                }
                 TriggerType.GPS_CIRCLE -> {
                     item { OutlinedTextField(draft.number1, { draft = draft.copy(number1 = it) }, label = { Text("Latitude") }, modifier = Modifier.fillMaxWidth()) }
                     item { OutlinedTextField(draft.number2, { draft = draft.copy(number2 = it) }, label = { Text("Longitude") }, modifier = Modifier.fillMaxWidth()) }
@@ -305,7 +379,12 @@ private fun EditorScreen(viewModel: AppViewModel, id: Long, close: () -> Unit) {
                 }
             }
             if (draft.type == TriggerType.CONNECTED_SSID || draft.type == TriggerType.CONNECTED_BSSID) {
-                item { OutlinedButton(onClick = { viewModel.currentWifi { current -> val value = if (draft.type == TriggerType.CONNECTED_SSID) current.first else current.second; if (value.isNullOrBlank()) error = "Current Wi-Fi identity is unavailable; grant permission or enter it manually" else draft = draft.copy(textValue = value) } }) { Text("Use current Wi-Fi") } }
+                item { OutlinedButton(onClick = { viewModel.currentWifi { current -> val value = if (draft.type == TriggerType.CONNECTED_SSID) current.first else current.second; if (value.isNullOrBlank()) error = "Current Wi-Fi identity is unavailable; grant permission or enter it manually" else {
+                        val targets = (listOf(draft.textValue) + draft.additionalTextValues).toMutableList()
+                        val empty = targets.indexOfFirst { it.isBlank() }
+                        if (empty >= 0) targets[empty] = value else if (value !in targets) targets.add(value)
+                        draft = draft.copy(textValue = targets.first(), additionalTextValues = targets.drop(1))
+                    } } }) { Text("Use current Wi-Fi") } }
             }
             if (draft.type == TriggerType.NEARBY_SSID || draft.type == TriggerType.NEARBY_BSSID) {
                 item { ChoiceRow("Best-effort scan mode", ScanMode.entries, draft.scanMode) { draft = draft.copy(scanMode = it) } }
@@ -329,10 +408,22 @@ private fun EditorScreen(viewModel: AppViewModel, id: Long, close: () -> Unit) {
             }
             item { CheckRow("One time", draft.oneTime) { draft = draft.copy(oneTime = it) } }
             if (error != null) item { Text(error!!, color = MaterialTheme.colorScheme.error) }
-            item { Button(onClick = { viewModel.save(draft) { message -> error = message; if (message == null) close() } }, modifier = Modifier.fillMaxWidth()) { Text("Save") } }
-            if (id != 0L) item { OutlinedButton(onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth()) { Text("Delete event") } }
+            item { Button(onClick = save, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text("Save") } }
+            if (id != 0L) item { OutlinedButton(onClick = { confirmDelete = true }, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text("Delete event") } }
         }
     }
+    if (confirmLeave) AlertDialog(
+        onDismissRequest = { confirmLeave = false },
+        title = { Text("Save changes?") },
+        text = { Text("This reminder has unsaved changes. Save them before returning home?") },
+        confirmButton = { Button(onClick = save) { Text("Save") } },
+        dismissButton = {
+            Column {
+                TextButton(onClick = { confirmLeave = false; close() }) { Text("Discard") }
+                TextButton(onClick = { confirmLeave = false }) { Text("Keep editing") }
+            }
+        },
+    )
     if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false }, title = { Text("Delete this event?") }, text = { Text("This permanently removes the rule. Trigger history is retained.") }, confirmButton = { Button(onClick = { viewModel.delete(id, close) }) { Text("Delete") } }, dismissButton = { OutlinedButton(onClick = { confirmDelete = false }) { Text("Cancel") } })
 }
 
@@ -377,11 +468,77 @@ private fun <T : Enum<T>> ChoiceRow(label: String, values: List<T>, selected: T,
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun DiagnosticsScreen(viewModel: AppViewModel, close: () -> Unit) {
+    val context = LocalContext.current
+    var revision by remember { mutableLongStateOf(0L) }
+    LifecycleResumeEffect(Unit) {
+        revision++
+        onPauseOrDispose { }
+    }
+    val channelIssues = remember(revision) { NotificationDispatcher(context).channelIssues() }
+    val scanStatus by viewModel.scanStatus.collectAsState()
     val events by viewModel.events.collectAsStateWithLifecycle()
     val status by viewModel.monitoringStatus.collectAsState()
     val currentWifi by viewModel.currentWifi.collectAsState()
     val lastScan by viewModel.lastScan.collectAsState()
     Scaffold(topBar = { TopAppBar(title = { Text("Diagnostics") }, navigationIcon = { Button(onClick = close) { Text("Back") } }) }) { padding ->
-        LazyColumn(Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { item { Text(status, style = MaterialTheme.typography.titleMedium) }; items(viewModel.permissions.diagnostics()) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(it.first); Text(it.second) } }; item { Text("Current Wi-Fi SSID: ${currentWifi.first ?: "Unavailable"}") }; item { Text("Current Wi-Fi BSSID: ${currentWifi.second ?: "Unavailable"}") }; item { Text(lastScan?.let { "Last successful Wi-Fi scan: ${DateFormat.getTimeInstance().format(Date(it.first))} • ${it.second} networks" } ?: "Last successful Wi-Fi scan: None") }; item { Text("Enabled events: ${events.count(NotificationEvent::enabled)}") }; item { Text("Wi-Fi scans are best effort. GPS accuracy and altitude can vary; distance triggering favors avoiding false alarms.") } }
+        LazyColumn(Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { item { Text(status, style = MaterialTheme.typography.titleMedium) }; item {
+            TextButton(onClick = {
+                context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
+            }) { Text("Notification settings") }
+            TextButton(onClick = {
+                context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:${context.packageName}".toUri()))
+            }) { Text("App permissions") }
+            BatteryOptimizationAction()
+        }; item { Text(scanStatus) }; items(channelIssues) { (channelId, issue) ->
+            TextButton(onClick = {
+                context.startActivity(Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    .putExtra(Settings.EXTRA_CHANNEL_ID, channelId))
+            }) { Text(issue) }
+        }; items(viewModel.permissions.diagnostics()) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(it.first); Text(it.second) } }; item { Text("Current Wi-Fi SSID: ${currentWifi.first ?: "Unavailable"}") }; item { Text("Current Wi-Fi BSSID: ${currentWifi.second ?: "Unavailable"}") }; item { Text(lastScan?.let { "Last successful Wi-Fi scan: ${DateFormat.getTimeInstance().format(Date(it.first))} • ${it.second} networks" } ?: "Last successful Wi-Fi scan: None") }; item { Text("Enabled events: ${events.count(NotificationEvent::enabled)}") }; item { Text("Wi-Fi scans are best effort. GPS accuracy and altitude can vary; distance triggering favors avoiding false alarms.") } }
     }
+}
+
+@Composable
+private fun BatteryOptimizationAction(autoPrompt: Boolean = false, showButton: Boolean = true) {
+    val context = LocalContext.current
+    val power = remember { context.getSystemService(PowerManager::class.java) }
+    val preferences = remember { context.getSharedPreferences("background-monitoring", Context.MODE_PRIVATE) }
+    var exempt by remember { mutableStateOf(power.isIgnoringBatteryOptimizations(context.packageName)) }
+    var showPrompt by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LifecycleResumeEffect(Unit) {
+        exempt = power.isIgnoringBatteryOptimizations(context.packageName)
+        if (exempt) showPrompt = false
+        onPauseOrDispose { }
+    }
+    LaunchedEffect(autoPrompt, exempt) {
+        if (autoPrompt && !exempt && !preferences.getBoolean("battery_prompt_shown", false)) {
+            preferences.edit { putBoolean("battery_prompt_shown", true) }
+            showPrompt = true
+        }
+    }
+    if (showButton) {
+        if (exempt) Text("Battery optimization disabled for OnMyWay")
+        else TextButton(onClick = { error = null; showPrompt = true }) { Text("Allow background reminders") }
+    }
+    if (showPrompt) AlertDialog(
+        onDismissRequest = { showPrompt = false },
+        title = { Text("Allow reliable background reminders?") },
+        text = { Text(error ?: "Battery optimization can delay Wi-Fi and movement reminders while your phone is idle. Allow OnMyWay to run without battery optimization. Monitoring runs only while reminders are enabled and may use more battery.") },
+        confirmButton = {
+            Button(onClick = {
+                try {
+                    context.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        "package:${context.packageName}".toUri()))
+                    showPrompt = false
+                } catch (_: ActivityNotFoundException) {
+                    error = "This phone does not provide the direct battery prompt. Open Settings > Apps > OnMyWay > Battery and choose Unrestricted or Don't optimize."
+                } catch (_: SecurityException) {
+                    error = "This phone blocked the direct battery prompt. Open Settings > Apps > OnMyWay > Battery and choose Unrestricted or Don't optimize."
+                }
+            }) { Text("Allow background operation") }
+        },
+        dismissButton = { TextButton(onClick = { showPrompt = false }) { Text("Not now") } },
+    )
 }

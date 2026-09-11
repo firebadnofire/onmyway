@@ -1,6 +1,6 @@
 # OnMyWay Release APK Workflow
 
-`.forgejo/workflows/release-apk.yml` builds a signed OnMyWay APK for a pushed
+`.forgejo/workflows/release.yml` builds a signed OnMyWay APK for a pushed
 `v*` or `V*` tag. It then creates and verifies an armored detached OpenPGP
 signature and publishes both files:
 
@@ -11,6 +11,13 @@ onmyway-<tag>.apk.asc
 
 Forgejo publishing is required. GitHub mirroring is optional and defaults to
 `firebadnofire/OnMyWay`.
+
+The workflow retains the FuelMath runner/bootstrap layout, adapted to OnMyWay's
+keystore path, artifact names, application ID, release title, and GitHub target.
+OnMyWay's pinned OpenPGP verification remains mandatory. Before publishing, CI
+runs unit tests and lint, verifies Android APK signing with `apksigner`, and checks
+that the APK package is `org.archuser.onmyway` using `aapt`. There is only one tag
+release workflow, `.forgejo/workflows/release.yml`.
 
 ## Runner environment
 

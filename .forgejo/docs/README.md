@@ -1,6 +1,6 @@
 # OnMyWay Release Workflow Notes
 
-The Forgejo workflow at `../workflows/release-apk.yml` builds an Android release
+The Forgejo workflow at `../workflows/release.yml` builds an Android release
 APK for each `v*` or `V*` tag, signs the APK with the Android application key,
 creates an armored detached OpenPGP signature, and publishes both files to
 Forgejo. GitHub mirroring to `firebadnofire/OnMyWay` is optional.

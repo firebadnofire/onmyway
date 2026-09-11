@@ -15,27 +15,46 @@ class TriggerEngine {
         return when (val config = event.config) {
             is TriggerConfig.ConnectedSsid -> evaluateCondition(
                 event,
-                (observation as? TriggerObservation.WifiConnection)?.let {
-                    it.connected && normalizeSsid(it.ssid) == normalizeSsid(config.ssid)
-                },
+                connectedIdentityCondition(
+                    observation = observation,
+                    configuredIdentities = config.wifiTargets(),
+                    observedIdentity = TriggerObservation.WifiConnection::ssid,
+                    normalize = ::normalizeSsid,
+                ),
                 observation.timestampMillis,
             )
             is TriggerConfig.ConnectedBssid -> evaluateCondition(
                 event,
-                (observation as? TriggerObservation.WifiConnection)?.let {
-                    it.connected && normalizeBssid(it.bssid) == normalizeBssid(config.bssid)
-                },
+                connectedIdentityCondition(
+                    observation = observation,
+                    configuredIdentities = config.wifiTargets(),
+                    observedIdentity = TriggerObservation.WifiConnection::bssid,
+                    normalize = ::normalizeBssid,
+                ),
                 observation.timestampMillis,
             )
             is TriggerConfig.NearbySsid -> evaluateScan(event, observation, observation.timestampMillis) { point ->
-                normalizeSsid(point.ssid) == normalizeSsid(config.ssid)
+                normalizeSsid(point.ssid)?.let { actual -> config.wifiTargets().any { normalizeSsid(it) == actual } } == true
             }
             is TriggerConfig.NearbyBssid -> evaluateScan(event, observation, observation.timestampMillis) { point ->
-                normalizeBssid(point.bssid) == normalizeBssid(config.bssid)
+                normalizeBssid(point.bssid)?.let { actual -> config.wifiTargets().any { normalizeBssid(it) == actual } } == true
             }
             is TriggerConfig.GpsCircle -> evaluateGps(event, config, observation)
             is TriggerConfig.DistanceTraveled -> evaluateDistance(event, config, observation)
         }
+    }
+
+    private fun connectedIdentityCondition(
+        observation: TriggerObservation,
+        configuredIdentities: List<String>,
+        observedIdentity: (TriggerObservation.WifiConnection) -> String?,
+        normalize: (String?) -> String?,
+    ): Boolean? {
+        val connection = observation as? TriggerObservation.WifiConnection ?: return null
+        if (!connection.connected) return false
+        val actual = normalize(observedIdentity(connection)) ?: return null
+        val expected = configuredIdentities.map { normalize(it) ?: return null }
+        return actual in expected
     }
 
     private fun evaluateScan(
@@ -112,6 +131,7 @@ class TriggerEngine {
         val second = current.altitudeMeters ?: return 0.0
         val firstAccuracy = baseline.verticalAccuracyMeters ?: return 0.0
         val secondAccuracy = current.verticalAccuracyMeters ?: return 0.0
+        if (!first.isFinite() || !second.isFinite() || !firstAccuracy.isFinite() || !secondAccuracy.isFinite()) return 0.0
         if (firstAccuracy <= 0f || secondAccuracy <= 0f || firstAccuracy > 20f || secondAccuracy > 20f) return 0.0
         return max(0.0, kotlin.math.abs(second - first) - max(firstAccuracy, secondAccuracy))
     }

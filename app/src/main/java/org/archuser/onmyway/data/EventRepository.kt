@@ -10,6 +10,8 @@ import org.archuser.onmyway.domain.ScanMode
 import org.archuser.onmyway.domain.TriggerConfig
 import org.archuser.onmyway.domain.TriggerState
 import org.archuser.onmyway.domain.TriggerType
+import org.archuser.onmyway.domain.wifiTargets
+import org.json.JSONArray
 
 class EventRepository(private val database: AppDatabase) {
     private val dao = database.eventDao()
@@ -91,29 +93,34 @@ private fun NotificationEvent.toEntity() = EventEntity(
 
 data class StoredData(val events: List<NotificationEvent>, val history: List<HistoryEntity>)
 
-private fun TriggerConfig.toEntity(eventId: Long): TriggerConfigEntity = when (this) {
-    is TriggerConfig.ConnectedSsid -> TriggerConfigEntity(eventId, ssid, null, null, null, null, null)
-    is TriggerConfig.ConnectedBssid -> TriggerConfigEntity(eventId, bssid, null, null, null, null, null)
-    is TriggerConfig.NearbySsid -> TriggerConfigEntity(eventId, ssid, null, null, null, scanMode.name, null)
-    is TriggerConfig.NearbyBssid -> TriggerConfigEntity(eventId, bssid, null, null, null, scanMode.name, null)
+internal fun TriggerConfig.toEntity(eventId: Long): TriggerConfigEntity = when (this) {
+    is TriggerConfig.ConnectedSsid -> TriggerConfigEntity(eventId, ssid, null, null, null, null, null, JSONArray(additionalSsids).toString())
+    is TriggerConfig.ConnectedBssid -> TriggerConfigEntity(eventId, bssid, null, null, null, null, null, JSONArray(additionalBssids).toString())
+    is TriggerConfig.NearbySsid -> TriggerConfigEntity(eventId, ssid, null, null, null, scanMode.name, null, JSONArray(additionalSsids).toString())
+    is TriggerConfig.NearbyBssid -> TriggerConfigEntity(eventId, bssid, null, null, null, scanMode.name, null, JSONArray(additionalBssids).toString())
     is TriggerConfig.GpsCircle -> TriggerConfigEntity(eventId, null, latitude, longitude, radiusMeters, null, null)
     is TriggerConfig.DistanceTraveled -> TriggerConfigEntity(eventId, null, distance, null, null, unit.name, includeElevation)
 }
 
-private fun TriggerConfigEntity.toDomain(type: TriggerType): TriggerConfig = when (type) {
-    TriggerType.CONNECTED_SSID -> TriggerConfig.ConnectedSsid(requireNotNull(textValue))
-    TriggerType.CONNECTED_BSSID -> TriggerConfig.ConnectedBssid(requireNotNull(textValue))
-    TriggerType.NEARBY_SSID -> TriggerConfig.NearbySsid(requireNotNull(textValue), ScanMode.valueOf(requireNotNull(optionValue)))
-    TriggerType.NEARBY_BSSID -> TriggerConfig.NearbyBssid(requireNotNull(textValue), ScanMode.valueOf(requireNotNull(optionValue)))
+private fun TriggerConfigEntity.extraTargets(): List<String> = additionalTargets?.let { text ->
+    val values = JSONArray(text)
+    (0 until values.length()).map { values.getString(it) }
+} ?: emptyList()
+
+internal fun TriggerConfigEntity.toDomain(type: TriggerType): TriggerConfig = when (type) {
+    TriggerType.CONNECTED_SSID -> TriggerConfig.ConnectedSsid(requireNotNull(textValue), extraTargets())
+    TriggerType.CONNECTED_BSSID -> TriggerConfig.ConnectedBssid(requireNotNull(textValue), extraTargets())
+    TriggerType.NEARBY_SSID -> TriggerConfig.NearbySsid(requireNotNull(textValue), ScanMode.valueOf(requireNotNull(optionValue)), extraTargets())
+    TriggerType.NEARBY_BSSID -> TriggerConfig.NearbyBssid(requireNotNull(textValue), ScanMode.valueOf(requireNotNull(optionValue)), extraTargets())
     TriggerType.GPS_CIRCLE -> TriggerConfig.GpsCircle(requireNotNull(numberValue1), requireNotNull(numberValue2), requireNotNull(numberValue3))
     TriggerType.DISTANCE_TRAVELED -> TriggerConfig.DistanceTraveled(requireNotNull(numberValue1), DistanceUnit.valueOf(requireNotNull(optionValue)), booleanValue == true)
 }
 
 fun TriggerConfig.summary(): String = when (this) {
-    is TriggerConfig.ConnectedSsid -> "Connected Wi-Fi • $ssid"
-    is TriggerConfig.ConnectedBssid -> "Connected access point • $bssid"
-    is TriggerConfig.NearbySsid -> "Nearby Wi-Fi • $ssid"
-    is TriggerConfig.NearbyBssid -> "Nearby access point • $bssid"
+    is TriggerConfig.ConnectedSsid -> "Connected Wi-Fi • ${wifiTargets().joinToString()}"
+    is TriggerConfig.ConnectedBssid -> "Connected access point • ${wifiTargets().joinToString()}"
+    is TriggerConfig.NearbySsid -> "Nearby Wi-Fi • ${wifiTargets().joinToString()}"
+    is TriggerConfig.NearbyBssid -> "Nearby access point • ${wifiTargets().joinToString()}"
     is TriggerConfig.GpsCircle -> "GPS region • ${radiusMeters.toInt()} m"
     is TriggerConfig.DistanceTraveled -> "Distance traveled • ${distance.toString().trimEnd('0').trimEnd('.')} ${if (unit == DistanceUnit.FEET) "ft" else "m"}"
 }

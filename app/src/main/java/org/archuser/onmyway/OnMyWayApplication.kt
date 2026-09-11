@@ -31,8 +31,7 @@ class OnMyWayApplication : Application() {
             repository,
             wifiMonitor,
             NotificationDispatcher(this, settingsStore),
-            CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
         )
-        coordinator.start()
     }
 }
